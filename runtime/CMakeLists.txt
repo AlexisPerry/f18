@@ -8,6 +8,7 @@
 
 add_library(FortranRuntime
   ISO_Fortran_binding.cc
+  buffer.cc
   derived-type.cc
   descriptor.cc
   format.cc
