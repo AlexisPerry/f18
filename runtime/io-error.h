@@ -31,7 +31,7 @@ public:
   void SignalEnd();
   void SignalEor();
 
-  int GetIoStat() const;
+  int GetIoStat() const { return ioStat_; }
 
 private:
   enum Flag : std::uint8_t {
@@ -41,8 +41,6 @@ private:
     hasEor = 8,  // EOR=
   };
   std::uint8_t flags_{0};
-  bool hitEnd_{false};
-  bool hitEor_{false};
   int ioStat_{0};
 };
 
