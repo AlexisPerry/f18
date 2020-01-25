@@ -13,6 +13,7 @@
 
 #include "io-error.h"
 #include "lock.h"
+#include "memory.h"
 #include "terminator.h"
 #include <cinttypes>
 #include <optional>
@@ -23,9 +24,12 @@ class OpenFile {
 public:
   using Offset = std::uint64_t;
 
-  explicit OpenFile(int fd) : fd_{fd} {}
-
   Offset position() const { return position_; }
+
+  void Open(const char *path, std::size_t pathLength, const char *status,
+      std::size_t statusLength, const char *action, std::size_t actionLength,
+      IoErrorHandler &);
+  void Close(const char *action, std::size_t actionLength, IoErrorHandler &);
 
   // Reads data into memory; returns amount acquired.  Synchronous.
   // Partial reads (less than minBytes) signify end-of-file.  If the
@@ -51,21 +55,23 @@ public:
 private:
   struct Pending {
     int id;
-    Pending *next{nullptr};
     int ioStat{0};
+    OwningPtr<Pending> next;
   };
 
   // lock_ must be held for these
+  void CheckOpen(Terminator &);
   bool Seek(Offset, IoErrorHandler &);
   bool RawSeek(Offset);
   int PendingResult(Terminator &, int);
 
-  int fd_;
   Lock lock_;
+  int fd_{-1};
+  OwningPtr<char> path_;
   Offset position_{0};
   std::optional<Offset> knownSize_;
   int nextId_;
-  Pending *pending_{nullptr};
+  OwningPtr<Pending> pending_;
 };
 }
 #endif  // FORTRAN_RUNTIME_FILE_H_

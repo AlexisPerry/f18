@@ -17,8 +17,6 @@ namespace Fortran::runtime::io {
 void IoErrorHandler::Begin(const char *sourceFileName, int sourceLine) {
   flags_ = 0;
   ioStat_ = 0;
-  hitEnd_ = false;
-  hitEor_ = false;
   SetLocation(sourceFileName, sourceLine);
 }
 
@@ -39,6 +37,8 @@ void IoErrorHandler::SignalError(int iostatOrErrno) {
     }
   }
 }
+
+void IoErrorHandler::SignalErrno() { SignalError(errno); }
 
 void IoErrorHandler::SignalEnd() {
   if (flags_ & hasEnd) {

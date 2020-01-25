@@ -34,10 +34,10 @@ private:
   pthread_mutex_t mutex_;
 };
 
-class LockHolder {
+class CriticalSection {
 public:
-  explicit LockHolder(Lock &lock) : lock_{lock} { lock_.Take(); }
-  ~LockHolder() { lock_.Drop(); }
+  explicit CriticalSection(Lock &lock) : lock_{lock} { lock_.Take(); }
+  ~CriticalSection() { lock_.Drop(); }
 
 private:
   Lock &lock_;

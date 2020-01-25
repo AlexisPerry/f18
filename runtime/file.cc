@@ -9,15 +9,128 @@
 #include "file.h"
 #include "magic-numbers.h"
 #include "memory.h"
-#include <errno.h>
+#include "tools.h"
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 namespace Fortran::runtime::io {
 
+void OpenFile::Open(const char *path, std::size_t pathLength,
+    const char *status, std::size_t statusLength, const char *action,
+    std::size_t actionLength, IoErrorHandler &handler) {
+  CriticalSection criticalSection{lock_};
+  RUNTIME_CHECK(handler, fd_ < 0);
+  int flags{0};
+  static const char *actions[]{"READ", "WRITE", "READWRITE", nullptr};
+  switch (IdentifyValue(action, actionLength, actions)) {
+  case 0: flags = O_RDONLY; break;
+  case 1: flags = O_WRONLY; break;
+  case 2: flags = O_RDWR; break;
+  default:
+    handler.Crash(
+        "Invalid ACTION='%.*s'", action, static_cast<int>(actionLength));
+  }
+  if (!status) {
+    status = "UNKNOWN", statusLength = 7;
+  }
+  static const char *statuses[]{
+      "OLD", "NEW", "SCRATCH", "REPLACE", "UNKNOWN", nullptr};
+  switch (IdentifyValue(status, statusLength, statuses)) {
+  case 0:  // STATUS='OLD'
+    if (!path && fd_ >= 0) {
+      // TODO: Update OpenFile in situ; can ACTION be changed?
+      return;
+    }
+    break;
+  case 1:  // STATUS='NEW'
+    flags |= O_CREAT | O_EXCL;
+    break;
+  case 2:  // STATUS='SCRATCH'
+    if (path_.get()) {
+      handler.Crash("FILE= must not appear with STATUS='SCRATCH'");
+      path_.reset();
+    }
+    {
+      char path[]{"/tmp/Fortran-Scratch-XXXXXX"};
+      fd_ = ::mkstemp(path);
+      if (fd_ < 0) {
+        handler.SignalErrno();
+      }
+      ::unlink(path);
+    }
+    return;
+  case 3:  // STATUS='REPLACE'
+    flags |= O_CREAT | O_TRUNC;
+    break;
+  case 4:  // STATUS='UNKNOWN'
+    if (fd_ >= 0) {
+      return;
+    }
+    flags |= O_CREAT;
+    break;
+  default:
+    handler.Crash(
+        "Invalid STATUS='%.*s'", status, static_cast<int>(statusLength));
+  }
+  // If we reach this point, we're opening a new file
+  if (fd_ >= 0) {
+    if (::close(fd_) != 0) {
+      handler.SignalErrno();
+    }
+  }
+  path_ = SaveDefaultCharacter(path, pathLength, handler);
+  if (!path_.get()) {
+    handler.Crash(
+        "FILE= is required unless STATUS='OLD' and unit is connected");
+  }
+  fd_ = ::open(path_.get(), flags, 0600);
+  if (fd_ < 0) {
+    handler.SignalErrno();
+  }
+  pending_.reset();
+  knownSize_.reset();
+}
+
+void OpenFile::Close(
+    const char *status, std::size_t statusLength, IoErrorHandler &handler) {
+  CriticalSection criticalSection{lock_};
+  CheckOpen(handler);
+  pending_.reset();
+  knownSize_.reset();
+  static const char *statuses[]{"KEEP", "DELETE", nullptr};
+  switch (IdentifyValue(status, statusLength, statuses)) {
+  case 0: break;
+  case 1:
+    if (path_.get()) {
+      ::unlink(path_.get());
+    }
+    break;
+  default:
+    if (status) {
+      handler.Crash(
+          "Invalid STATUS='%.*s'", status, static_cast<int>(statusLength));
+    }
+  }
+  path_.reset();
+  if (fd_ >= 0) {
+    if (::close(fd_) != 0) {
+      handler.SignalErrno();
+    }
+    fd_ = -1;
+  }
+}
+
 std::size_t OpenFile::Read(Offset at, char *buffer, std::size_t minBytes,
     std::size_t maxBytes, IoErrorHandler &handler) {
-  LockHolder locked{lock_};
-  if (maxBytes == 0 || !Seek(at, handler)) {
+  if (maxBytes == 0) {
+    return 0;
+  }
+  CriticalSection criticalSection{lock_};
+  CheckOpen(handler);
+  if (!Seek(at, handler)) {
     return 0;
   }
   if (maxBytes < minBytes) {
@@ -46,8 +159,12 @@ std::size_t OpenFile::Read(Offset at, char *buffer, std::size_t minBytes,
 
 std::size_t OpenFile::Write(
     Offset at, const char *buffer, std::size_t bytes, IoErrorHandler &handler) {
-  LockHolder locked{lock_};
-  if (bytes == 0 || !Seek(at, handler)) {
+  if (bytes == 0) {
+    return 0;
+  }
+  CriticalSection criticalSection{lock_};
+  CheckOpen(handler);
+  if (!Seek(at, handler)) {
     return 0;
   }
   std::size_t put{0};
@@ -71,10 +188,11 @@ std::size_t OpenFile::Write(
 }
 
 void OpenFile::Truncate(Offset at, IoErrorHandler &handler) {
-  LockHolder locked{lock_};
+  CriticalSection criticalSection{lock_};
+  CheckOpen(handler);
   if (!knownSize_ || *knownSize_ != at) {
     if (::ftruncate(fd_, at) != 0) {
-      handler.SignalError(errno);
+      handler.SignalErrno();
     }
     knownSize_ = at;
   }
@@ -82,7 +200,8 @@ void OpenFile::Truncate(Offset at, IoErrorHandler &handler) {
 
 int OpenFile::ReadAsynchronously(
     Offset at, char *buffer, std::size_t bytes, IoErrorHandler &handler) {
-  LockHolder locked{lock_};
+  CriticalSection criticalSection{lock_};
+  CheckOpen(handler);
   int iostat{0};
   for (std::size_t got{0}; got < bytes;) {
 #if _XOPEN_SOURCE >= 500 || _POSIX_C_SOURCE >= 200809L
@@ -110,7 +229,8 @@ int OpenFile::ReadAsynchronously(
 
 int OpenFile::WriteAsynchronously(
     Offset at, const char *buffer, std::size_t bytes, IoErrorHandler &handler) {
-  LockHolder locked{lock_};
+  CriticalSection criticalSection{lock_};
+  CheckOpen(handler);
   int iostat{0};
   for (std::size_t put{0}; put < bytes;) {
 #if _XOPEN_SOURCE >= 500 || _POSIX_C_SOURCE >= 200809L
@@ -133,43 +253,45 @@ int OpenFile::WriteAsynchronously(
 }
 
 void OpenFile::Wait(int id, IoErrorHandler &handler) {
-  Pending *p{nullptr};
+  std::optional<int> ioStat;
   {
-    LockHolder locked{lock_};
+    CriticalSection criticalSection{lock_};
     Pending *prev{nullptr};
-    for (p = pending_; p; prev = p, p = p->next) {
+    for (Pending *p{pending_.get()}; p; p = (prev = p)->next.get()) {
       if (p->id == id) {
+        ioStat = p->ioStat;
         if (prev) {
-          prev->next = p->next;
+          prev->next.reset(p->next.release());
         } else {
-          pending_ = p->next;
+          pending_.reset(p->next.release());
         }
-        p->next = nullptr;
         break;
       }
     }
   }
-  if (p) {
-    handler.SignalError(p->ioStat);
-    FreeMemory(p);
+  if (ioStat) {
+    handler.SignalError(*ioStat);
   }
 }
 
 void OpenFile::WaitAll(IoErrorHandler &handler) {
   while (true) {
-    Pending *p{nullptr};
+    int ioStat;
     {
-      LockHolder locked{lock_};
-      p = pending_;
-      if (!p) {
+      CriticalSection criticalSection{lock_};
+      if (pending_) {
+        ioStat = pending_->ioStat;
+        pending_.reset(pending_->next.release());
+      } else {
         return;
       }
-      pending_ = p->next;
-      p->next = nullptr;
     }
-    handler.SignalError(p->ioStat);
-    FreeMemory(p);
+    handler.SignalError(ioStat);
   }
+}
+
+void OpenFile::CheckOpen(Terminator &terminator) {
+  RUNTIME_CHECK(terminator, fd_ >= 0);
 }
 
 bool OpenFile::Seek(Offset at, IoErrorHandler &handler) {
@@ -179,7 +301,7 @@ bool OpenFile::Seek(Offset at, IoErrorHandler &handler) {
     position_ = at;
     return true;
   } else {
-    handler.SignalError(errno);
+    handler.SignalErrno();
     return false;
   }
 }
@@ -194,7 +316,7 @@ bool OpenFile::RawSeek(Offset at) {
 
 int OpenFile::PendingResult(Terminator &terminator, int iostat) {
   int id{nextId_++};
-  pending_ = &New<Pending>{}(terminator, id, pending_, iostat);
+  pending_.reset(&New<Pending>{}(terminator, id, iostat, std::move(pending_)));
   return id;
 }
 }

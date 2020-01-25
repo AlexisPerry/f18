@@ -19,6 +19,7 @@ add_library(FortranRuntime
   memory.cc
   stop.cc
   terminator.cc
+  tools.cc
   transformational.cc
   type-code.cc
 )

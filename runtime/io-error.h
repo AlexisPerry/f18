@@ -28,6 +28,7 @@ public:
   void HasEorLabel() { flags_ |= hasEor; }
 
   void SignalError(int iostatOrErrno);
+  void SignalErrno();
   void SignalEnd();
   void SignalEor();
 
