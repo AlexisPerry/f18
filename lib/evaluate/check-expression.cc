@@ -283,7 +283,10 @@ public:
   Result operator()(const CoarrayRef &x) const {
     return CheckSubscripts(x.subscript());
   }
-  Result operator()(const Component &) const { return false; }
+  Result operator()(const Component &x) const {
+    const auto &symbol{x.GetLastSymbol()};
+    return symbol.Rank() > 0 && (*this)(symbol);
+  }
   Result operator()(const ComplexPart &) const { return false; }
   Result operator()(const Substring &) const { return false; }
 
